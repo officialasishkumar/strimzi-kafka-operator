@@ -23,6 +23,7 @@ import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.security.GeneralSecurityException;
+import java.time.Duration;
 
 /**
  * Creates HTTP client and interacts with Kafka Agent's REST endpoint
@@ -30,6 +31,7 @@ import java.security.GeneralSecurityException;
 public class KafkaAgentClient {
     private static final ReconciliationLogger LOGGER = ReconciliationLogger.create(KafkaAgentClient.class.getName());
     private static final ObjectMapper MAPPER = new ObjectMapper();
+    private static final Duration HTTP_TIMEOUT = Duration.ofSeconds(30);
 
     private static final String BROKER_STATE_REST_PATH = "/v1/broker-state/";
     private static final int KAFKA_AGENT_HTTPS_PORT = 8443;
@@ -69,6 +71,17 @@ public class KafkaAgentClient {
         this.cluster =  cluster;
     }
 
+    KafkaAgentClient(Reconciliation reconciliation, String cluster, String namespace, HttpClient httpClient) {
+        this.reconciliation = reconciliation;
+        this.namespace = namespace;
+        this.cluster = cluster;
+        this.httpClient = httpClient;
+    }
+
+    static HttpClient.Builder configureHttpClient(HttpClient.Builder builder) {
+        return builder.connectTimeout(HTTP_TIMEOUT);
+    }
+
     private HttpClient createHttpClient() {
         if (tlsPemIdentity == null) {
             throw new RuntimeException("Missing cluster CA and operator certificates required to create connection to Kafka Agent");
@@ -92,7 +105,7 @@ public class KafkaAgentClient {
             SSLContext sslContext = SSLContext.getInstance("TLS");
             sslContext.init(keyManagerFactory.getKeyManagers(), trustManagerFactory.getTrustManagers(), null);
 
-            return HttpClient.newBuilder()
+            return configureHttpClient(HttpClient.newBuilder())
                     .sslContext(sslContext)
                     .build();
         } catch (GeneralSecurityException | IOException e) {
@@ -100,19 +113,27 @@ public class KafkaAgentClient {
         }
     }
 
+    HttpRequest buildGetRequest(URI uri) {
+        return HttpRequest.newBuilder()
+                .uri(uri)
+                .timeout(HTTP_TIMEOUT)
+                .GET()
+                .build();
+    }
+
     String doGet(URI uri) {
         try {
-            HttpRequest req = HttpRequest.newBuilder()
-                    .uri(uri)
-                    .GET()
-                    .build();
+            HttpRequest req = buildGetRequest(uri);
 
             var response = httpClient.send(req, HttpResponse.BodyHandlers.ofString());
             if (response.statusCode() != 200) {
                 throw new RuntimeException("Unexpected HTTP status code: " + response.statusCode());
             }
             return response.body();
-        } catch (IOException | InterruptedException e) {
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new RuntimeException("Failed to send HTTP request to Kafka Agent", e);
+        } catch (IOException e) {
             throw new RuntimeException("Failed to send HTTP request to Kafka Agent", e);
         }
     }
